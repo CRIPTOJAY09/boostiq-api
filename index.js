@@ -1,18 +1,17 @@
-
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const axios = require('axios');
-const crypto = require('crypto');
 const NodeCache = require('node-cache');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-const cache = new NodeCache({ stdTTL: 180 });
-const longCache = new NodeCache({ stdTTL: 3600 });
+// Configuración de caché
+const cache = new NodeCache({ stdTTL: 180 }); // Corto plazo
+const longCache = new NodeCache({ stdTTL: 3600 }); // Largo plazo
 
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 
@@ -61,14 +60,21 @@ async function get24hrVolume(symbol) {
 
 function calculateRSI(prices, period = 14) {
   if (prices.length < period + 1) return 50;
-  const gains = [], losses = [];
-  for (let i = 1; i < prices.length; i++) {
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
     const change = prices[i] - prices[i - 1];
-    gains.push(change > 0 ? change : 0);
-    losses.push(change < 0 ? Math.abs(change) : 0);
+    if (change > 0) gains += change;
+    else losses -= change;
   }
-  const avgGain = gains.slice(-period).reduce((a, b) => a + b, 0) / period;
-  const avgLoss = losses.slice(-period).reduce((a, b) => a + b, 0) / period;
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+
+  for (let i = period + 1; i < prices.length; i++) {
+    const change = prices[i] - prices[i - 1];
+    avgGain = (avgGain * (period - 1) + (change > 0 ? change : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (change < 0 ? -change : 0)) / period;
+  }
+
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return Math.max(0, Math.min(100, 100 - 100 / (1 + rs))).toFixed(2);
@@ -84,11 +90,17 @@ function calculateEMA(prices, period) {
 }
 
 function calculateMACD(prices) {
-  if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0 };
+  if (prices.length < 35) return { macd: 0, signal: 0, histogram: 0 };
   const ema12 = calculateEMA(prices, 12);
   const ema26 = calculateEMA(prices, 26);
   const macd = ema12 - ema26;
-  return { macd: macd.toFixed(4), signal: 0, histogram: macd.toFixed(4) };
+  const signal = calculateEMA([macd], 9);
+  const histogram = macd - signal;
+  return {
+    macd: macd.toFixed(4),
+    signal: signal.toFixed(4),
+    histogram: histogram.toFixed(4)
+  };
 }
 
 function calculateVolatility(prices) {
@@ -118,9 +130,12 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
-// Endpoint raíz
+// Endpoint raíz con cache opcional
 app.get('/', (req, res) => {
-  res.json({
+  const cached = cache.get('root');
+  if (cached) return res.json(cached);
+
+  const responseData = {
     message: '🚀 BoostIQ Crypto Signals API v2.0 - Sistema Profesional de Detección',
     version: '2.0.0',
     algorithm: 'Advanced Multi-Factor Analysis',
@@ -133,9 +148,13 @@ app.get('/', (req, res) => {
       '📊 Métricas de salud y rendimiento del sistema',
       '💡 Recomendaciones personalizadas por token'
     ]
-  });
+  };
+
+  cache.set('root', responseData);
+  res.json(responseData);
 });
 
+// Lanzar el servidor
 app.listen(PORT, () => {
   console.log(`🚀 BoostIQ API v2.0 corriendo en el puerto ${PORT}`);
 });
