@@ -1,0 +1,12 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 10000  # 10 segundos
+restartPolicyType = "ON_FAILURE"
+
+[env]
+PORT = "8080"
+NODE_ENV = "production"
+BINANCE_API_KEY = "REPLACE_ME"
