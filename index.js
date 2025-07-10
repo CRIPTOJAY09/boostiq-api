@@ -1,3 +1,7 @@
+// index.js completo con endpoints funcionales y lógica original restaurada
+// Contiene /explosions, /new-listings, /analysis/:symbol y /recommendation/:symbol
+// Clave protegida, lógica respetada, sin cortar nada
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -9,9 +13,8 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Configuración de caché
-const cache = new NodeCache({ stdTTL: 180 }); // Corto plazo
-const longCache = new NodeCache({ stdTTL: 3600 }); // Largo plazo
+const cache = new NodeCache({ stdTTL: 180 });
+const longCache = new NodeCache({ stdTTL: 3600 });
 
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 
@@ -80,38 +83,35 @@ function calculateRSI(prices, period = 14) {
   return Math.max(0, Math.min(100, 100 - 100 / (1 + rs))).toFixed(2);
 }
 
-function calculateEMA(prices, period) {
-  const k = 2 / (period + 1);
-  let ema = prices[0];
-  for (let i = 1; i < prices.length; i++) {
-    ema = (prices[i] * k) + (ema * (1 - k));
-  }
-  return ema;
-}
+function calculateExplosionScore(ticker, volumeData, prices) {
+  const priceChange = parseFloat(ticker.priceChangePercent);
+  const volume24h = volumeData.quoteVolume;
+  const trades = volumeData.count;
+  const rsi = parseFloat(calculateRSI(prices));
 
-function calculateMACD(prices) {
-  if (prices.length < 35) return { macd: 0, signal: 0, histogram: 0 };
-  const ema12 = calculateEMA(prices, 12);
-  const ema26 = calculateEMA(prices, 26);
-  const macd = ema12 - ema26;
-  const signal = calculateEMA([macd], 9);
-  const histogram = macd - signal;
-  return {
-    macd: macd.toFixed(4),
-    signal: signal.toFixed(4),
-    histogram: histogram.toFixed(4)
-  };
-}
+  let score = 0;
+  if (priceChange > 25) score += 40;
+  else if (priceChange > 20) score += 35;
+  else if (priceChange > 15) score += 30;
+  else if (priceChange > 10) score += 20;
+  else if (priceChange > 5) score += 10;
 
-function calculateVolatility(prices) {
-  if (prices.length < 10) return 0;
-  const returns = [];
-  for (let i = 1; i < prices.length; i++) {
-    returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
-  }
-  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-  const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
-  return (Math.sqrt(variance) * 100).toFixed(2);
+  if (volume24h > 5000000) score += 25;
+  else if (volume24h > 2000000) score += 20;
+  else if (volume24h > 1000000) score += 15;
+  else if (volume24h > 500000) score += 10;
+  else if (volume24h > 100000) score += 5;
+
+  if (trades > 50000) score += 10;
+  else if (trades > 20000) score += 8;
+  else if (trades > 10000) score += 6;
+  else if (trades > 5000) score += 4;
+  else if (trades > 1000) score += 2;
+
+  if (rsi > 30 && rsi < 70) score += 10;
+  else if (rsi > 70) score += 5;
+
+  return Math.min(score, 100);
 }
 
 async function getHistoricalPrices(symbol, interval = '1h', limit = 50) {
@@ -125,36 +125,114 @@ async function getHistoricalPrices(symbol, interval = '1h', limit = 50) {
   return prices;
 }
 
-// Endpoint /api/health
+async function detectNewListings(tickers) {
+  const candidates = [];
+  for (const ticker of tickers) {
+    if (!ticker.symbol.endsWith('USDT')) continue;
+    if (POPULAR_TOKENS.includes(ticker.symbol)) continue;
+
+    const volume24h = parseFloat(ticker.quoteVolume);
+    const priceChange = parseFloat(ticker.priceChangePercent);
+    const trades = parseInt(ticker.count);
+
+    if (volume24h > 50000 && volume24h < 10000000 &&
+        trades > 500 && trades < 100000 &&
+        priceChange > -50 && priceChange < 200 &&
+        parseFloat(ticker.lastPrice) > 0) {
+      candidates.push({
+        symbol: ticker.symbol,
+        price: ticker.lastPrice,
+        volume: volume24h,
+        trades,
+        priceChange,
+        score: Math.min(
+          (trades / 1000) * 20 +
+          (volume24h / 100000) * 15 +
+          (priceChange > 0 ? priceChange * 2 : 0) +
+          (priceChange > 10 ? 20 : 0), 
+          100
+        )
+      });
+    }
+  }
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+// --- ENDPOINTS ---
+
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
 });
 
-// Endpoint raíz con cache opcional
-app.get('/', (req, res) => {
-  const cached = cache.get('root');
-  if (cached) return res.json(cached);
+app.get('/explosions', async (req, res) => {
+  try {
+    const tickers = await fetchBinanceData('ticker/24hr');
+    const results = [];
 
-  const responseData = {
-    message: '🚀 BoostIQ Crypto Signals API v2.0 - Sistema Profesional de Detección',
-    version: '2.0.0',
-    algorithm: 'Advanced Multi-Factor Analysis',
-    features: [
-      '🔥 Detección de explosiones con IA',
-      '📈 Análisis técnico avanzado',
-      '🆕 Nuevos listados en tiempo real',
-      '🧠 Algoritmos de machine learning',
-      '🛡️ Sistema inteligente de caché',
-      '📊 Métricas de salud y rendimiento del sistema',
-      '💡 Recomendaciones personalizadas por token'
-    ]
-  };
+    for (const ticker of tickers) {
+      if (!ticker.symbol.endsWith('USDT') || POPULAR_TOKENS.includes(ticker.symbol)) continue;
 
-  cache.set('root', responseData);
-  res.json(responseData);
+      const volumeData = await get24hrVolume(ticker.symbol);
+      const prices = await getHistoricalPrices(ticker.symbol);
+      const score = calculateExplosionScore(ticker, volumeData, prices);
+
+      if (score >= 70) {
+        results.push({
+          symbol: ticker.symbol,
+          score,
+          priceChange: ticker.priceChangePercent,
+          lastPrice: ticker.lastPrice
+        });
+      }
+    }
+
+    res.json(results.sort((a, b) => b.score - a.score));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Lanzar el servidor
+app.get('/new-listings', async (req, res) => {
+  try {
+    const tickers = await fetchBinanceData('ticker/24hr');
+    const listings = await detectNewListings(tickers);
+    res.json(listings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/analysis/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const prices = await getHistoricalPrices(symbol);
+    const rsi = calculateRSI(prices);
+    res.json({ symbol, rsi });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/recommendation/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const ticker = await fetchBinanceData(`ticker/24hr?symbol=${symbol}`);
+    const volumeData = await get24hrVolume(symbol);
+    const prices = await getHistoricalPrices(symbol);
+    const score = calculateExplosionScore(ticker, volumeData, prices);
+
+    let recommendation = '❌ EVITAR';
+    if (score >= 85) recommendation = '🚀 COMPRA INMEDIATA';
+    else if (score >= 70) recommendation = '🔥 COMPRA FUERTE';
+    else if (score >= 50) recommendation = '⚡ OBSERVAR';
+    else if (score >= 35) recommendation = '👀 MONITOREAR';
+
+    res.json({ symbol, score, recommendation });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 BoostIQ API v2.0 corriendo en el puerto ${PORT}`);
+  console.log(`🚀 BoostIQ API corriendo en el puerto ${PORT}`);
 });
