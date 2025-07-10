@@ -1,3 +1,4 @@
+// BoostIQ API - Señales de trading completas
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
@@ -6,7 +7,6 @@ require("dotenv").config();
 
 const app = express();
 
-// Configuración optimizada para señales de trading
 const CONFIG = {
   MIN_VOLUME_EXPLOSION: 100000,
   MIN_VOLUME_REGULAR: 50000,
@@ -19,13 +19,6 @@ const CONFIG = {
   REQUEST_TIMEOUT: 10000,
   PORT: process.env.PORT || 8080
 };
-
-let explosionCache = null;
-let regularCache = null;
-let newListingsCache = null;
-let lastExplosionFetch = 0;
-let lastRegularFetch = 0;
-let lastNewListingsFetch = 0;
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
@@ -133,6 +126,29 @@ app.get("/api/recommendation/:symbol", async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: "Recommendation failed", message: e.message });
+  }
+});
+
+app.get("/api/explosion-candidates", async (req, res) => {
+  try {
+    const response = await axios.get(CONFIG.BINANCE_API_URL, {
+      timeout: CONFIG.REQUEST_TIMEOUT
+    });
+    const data = response.data.filter(t => t.symbol.endsWith("USDT"));
+    const candidates = data.filter(t => {
+      const vol = parseFloat(t.quoteVolume);
+      const change = parseFloat(t.priceChangePercent);
+      return vol > CONFIG.MIN_VOLUME_EXPLOSION && change > CONFIG.MIN_GAIN_EXPLOSION;
+    }).sort((a, b) => parseFloat(b.priceChangePercent) - parseFloat(a.priceChangePercent))
+      .slice(0, CONFIG.TOP_COUNT);
+
+    res.json({
+      success: true,
+      data: candidates,
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Explosion fetch failed", message: e.message });
   }
 });
 
